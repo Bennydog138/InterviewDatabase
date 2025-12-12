@@ -13,47 +13,30 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, onSnapshot, query, doc, updateDoc, deleteDoc, setLogLevel, Timestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // IMPORTANT: Global variables provided by the Canvas environment (used or defaults assigned)
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        // IMPORTANT: Global variables provided by the Canvas environment (MUST be used)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : null;
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const firebaseConfigString = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
         
-        // --- USER-PROVIDED CONFIGURATION (Used for self-hosting/GitHub Pages) ---
-        const userProvidedConfig = {
-            apiKey: "AIzaSyBp08uDYjTsjpZ1sP1xgNZ8dd_tVmytEcM",
-            authDomain: "interviewss-e3ed9.firebaseapp.com",
-            projectId: "interviewss-e3ed9",
-            storageBucket: "interviewss-e3ed9.firebasestorage.app",
-            messagingSenderId: "374016275776",
-            appId: "1:374016275776:web:23636a52f3b46ba80576a5",
-            measurementId: "G-N2P4HXBF6E"
-        };
-
         let firebaseConfig = null;
-        let isSelfHosted = false;
 
-        // --- Configuration Loading Logic (More Robust) ---
-        if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-            try {
-                // 1. Try to use Canvas environment config first
-                firebaseConfig = JSON.parse(__firebase_config);
-                console.log("Using Canvas environment Firebase configuration.");
-            } catch (e) {
-                // 2. Fallback if Canvas config exists but is invalid JSON
-                console.error("ERROR: Failed to parse __firebase_config JSON. Falling back to user-provided config.", e);
-                firebaseConfig = userProvidedConfig;
-                isSelfHosted = true;
-            }
+        // --- Configuration Loading and Strict Validation ---
+        if (!firebaseConfigString || !appId) {
+            console.error("CRITICAL ERROR: Canvas environment variables (__firebase_config or __app_id) are missing. Cannot initialize Firebase.");
+            // Signal a failure to the startApplication logic
         } else {
-            // 3. Fallback if Canvas config is completely missing (Self-Hosting mode)
-            console.warn("WARNING: Canvas environment config (__firebase_config) is missing. Using user-provided Firebase configuration for self-hosting.");
-            firebaseConfig = userProvidedConfig;
-            isSelfHosted = true;
-        }
-
-        // Final check to ensure the config object is valid before proceeding
-        if (!firebaseConfig || !firebaseConfig.apiKey) {
-             // This will be caught by the startApplication try/catch block
-             throw new Error("Firebase configuration object is invalid or does not contain an apiKey. Cannot initialize Firebase.");
+            try {
+                firebaseConfig = JSON.parse(firebaseConfigString);
+                // Ensure basic required fields exist after parsing
+                if (!firebaseConfig.projectId || !firebaseConfig.apiKey) {
+                    throw new Error("Parsed config is missing required fields (projectId, apiKey).");
+                }
+                console.log("Firebase configuration successfully loaded from environment variables.");
+            } catch (e) {
+                console.error("CRITICAL ERROR: Failed to parse or validate Firebase configuration JSON from environment.", e);
+                // Reset config on failure to trigger the application error path
+                firebaseConfig = null;
+            }
         }
         
         // Hardcoded credentials for the design request (client-side login simulation)
@@ -87,14 +70,12 @@
          * Converts Date object or ISO string to a Firebase Timestamp object.
          */
         function toFirestoreTimestamp(date) {
-            // Checks if it's already a Firestore Timestamp object before trying to create one.
             if (date && typeof date.toDate === 'function') {
                 return date;
             }
             if (date instanceof Date) {
                 return Timestamp.fromDate(date);
             }
-            // If it's a plain object retrieved from a collection list before full conversion (unlikely but safe), treat it as a Timestamp.
             if (date && date.seconds && date.nanoseconds) {
                  return new Timestamp(date.seconds, date.nanoseconds);
             }
@@ -131,33 +112,36 @@
         }
 
         async function startApplication() {
+            document.getElementById('loading-indicator').classList.remove('hidden');
+            document.getElementById('app-container').classList.add('hidden');
+
             try {
-                // Display warning if the user is self-hosting but hasn't updated the default provided key.
-                if (isSelfHosted && firebaseConfig.apiKey === userProvidedConfig.apiKey) {
-                    const warningDiv = document.getElementById('firebase-warning');
-                    warningDiv.classList.remove('hidden');
-                    warningDiv.textContent = 'NOTICE: Using user-provided Firebase configuration. Ensure your Firebase project and security rules allow Anonymous or Custom Token sign-in.';
+                // 1. Critical Check: Ensure config is available after initial checks
+                if (!firebaseConfig) {
+                    throw new Error("Firebase configuration is unavailable or invalid JSON. Check console for details.");
                 }
 
+                document.getElementById('firebase-error').classList.add('hidden'); // Clear previous errors
+
+                // 2. Initialize Firebase Services
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
 
-                // Authenticate (NON-BLOCKING)
+                // 3. Authenticate (NON-BLOCKING promise chain)
                 const signinPromise = (initialAuthToken)
                     ? signInWithCustomToken(auth, initialAuthToken)
-                    : signInAnonymously(auth); // Fallback to Anonymous sign-in for self-hosting
+                    : signInAnonymously(auth); // Fallback to Anonymous sign-in 
 
                 signinPromise.catch(e => {
                     console.error("Authentication failed during sign-in attempt:", e.message);
                 });
 
-                // Listen for authentication state changes
+                // 4. Listen for Authentication State Changes
                 onAuthStateChanged(auth, (user) => {
                     authReady = true;
                     document.getElementById('loading-indicator').classList.add('hidden');
                     document.getElementById('app-container').classList.remove('hidden');
-                    document.getElementById('firebase-warning').classList.add('hidden'); // Hide warning once auth is confirmed
 
                     if (user) {
                         userId = user.uid;
@@ -169,17 +153,17 @@
                     } else {
                         userId = null;
                         interviewsCollectionRef = null;
-                        document.getElementById('auth-status').textContent = 'Authentication Failed. Cannot access database.';
+                        document.getElementById('auth-status').textContent = 'Authentication Failed.';
                         
                         // Display error prominently
                         const errorDiv = document.getElementById('firebase-error');
                         errorDiv.classList.remove('hidden');
-                        errorDiv.textContent = 'ERROR: Failed to connect to database. Check console for Firebase permissions/security rule issues.';
+                        errorDiv.textContent = 'ERROR: Database access denied. Check console for Firebase permissions/security rule issues.';
                     }
                 });
 
             } catch (error) {
-                console.log("--- Firebase Initialization Error ---");
+                console.log("--- Critical Application Initialization Error ---");
                 console.error(error);
                 
                 document.getElementById('loading-indicator').classList.add('hidden');
@@ -196,6 +180,13 @@
             const password = document.getElementById('login-password').value;
             const errorEl = document.getElementById('login-error');
             const loginButton = document.getElementById('login-button');
+
+            // Block UI if Firebase failed to initialize
+            if (!authReady || !userId) {
+                errorEl.textContent = 'System offline. Waiting for database connection...';
+                errorEl.classList.remove('hidden');
+                return;
+            }
 
             errorEl.classList.add('hidden');
             loginButton.textContent = 'Logging In...';
@@ -572,11 +563,6 @@
 
     <!-- Main Application Container -->
     <div id="app-container" class="hidden main-card">
-        
-        <!-- Global Firebase Warning Banner (Only for self-hosting with default key) -->
-        <div id="firebase-warning" class="hidden fixed top-0 left-0 right-0 p-3 bg-yellow-500 text-gray-800 text-sm text-center font-bold z-40 rounded-b-lg shadow-xl">
-            <!-- Warning message injected here -->
-        </div>
 
         <!-- Global Firebase Error Banner (for critical failure) -->
         <div id="firebase-error" class="hidden fixed top-0 left-0 right-0 p-3 bg-red-600 text-white text-sm text-center font-bold z-40 rounded-b-lg shadow-xl">
