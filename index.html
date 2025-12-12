@@ -19,29 +19,28 @@
         const firebaseConfigString = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
         
         let firebaseConfig = null;
+        let useLocalStorage = false; // Flag to determine persistence method
 
         // --- Configuration Loading and Strict Validation ---
         if (!firebaseConfigString || !appId) {
-            console.error("CRITICAL ERROR: Canvas environment variables (__firebase_config or __app_id) are missing. Cannot initialize Firebase.");
-            // Signal a failure to the startApplication logic
+            console.error("CRITICAL ERROR: Canvas environment variables (__firebase_config or __app_id) are missing.");
         } else {
             try {
                 firebaseConfig = JSON.parse(firebaseConfigString);
-                // Ensure basic required fields exist after parsing
                 if (!firebaseConfig.projectId || !firebaseConfig.apiKey) {
                     throw new Error("Parsed config is missing required fields (projectId, apiKey).");
                 }
                 console.log("Firebase configuration successfully loaded from environment variables.");
             } catch (e) {
                 console.error("CRITICAL ERROR: Failed to parse or validate Firebase configuration JSON from environment.", e);
-                // Reset config on failure to trigger the application error path
-                firebaseConfig = null;
+                firebaseConfig = null; // Reset config on failure
             }
         }
         
         // Hardcoded credentials for the design request (client-side login simulation)
         const MOCK_USERNAME = "staff";
         const MOCK_PASSWORD = "password123";
+        const LOCAL_STORAGE_KEY = "interview_notes_data";
 
         let db = null;
         let auth = null;
@@ -49,6 +48,8 @@
         let interviewsCollectionRef = null;
         let allInterviews = []; // Store fetched interviews
         let currentSelectedInterviewId = null;
+        let snapshotListener = null; // Placeholder for Firestore unsubscribe function
+        let mockDataInterval = null; // Placeholder for LocalStorage mock interval
 
         // Enable Firebase debug logging
         setLogLevel('debug');
@@ -63,25 +64,89 @@
             if (timestamp && timestamp.toDate) {
                 return timestamp.toDate().toLocaleString(); 
             }
+            if (timestamp instanceof Date) {
+                return timestamp.toLocaleString();
+            }
             return 'Date Unknown';
         }
 
         /**
          * Converts Date object or ISO string to a Firebase Timestamp object.
+         * Used primarily for sorting consistency.
          */
         function toFirestoreTimestamp(date) {
             if (date && typeof date.toDate === 'function') {
                 return date;
             }
             if (date instanceof Date) {
-                return Timestamp.fromDate(date);
+                // If using LocalStorage, we just return the Date object for sorting
+                return date; 
             }
-            if (date && date.seconds && date.nanoseconds) {
-                 return new Timestamp(date.seconds, date.nanoseconds);
+            // Attempt to parse ISO string if it's from local storage
+            if (typeof date === 'string' || (date && date.seconds && date.nanoseconds)) {
+                return new Date(date);
             }
-            return new Timestamp(0, 0); // Fallback for safety
+            return new Date(0); // Fallback
         }
 
+        // --- Local Storage Fallback Functions ---
+
+        /**
+         * Loads all interviews from local storage.
+         */
+        function loadFromLocalStorage() {
+            try {
+                const data = localStorage.getItem(LOCAL_STORAGE_KEY);
+                return data ? JSON.parse(data) : [];
+            } catch (e) {
+                console.error("Error loading from localStorage:", e);
+                return [];
+            }
+        }
+
+        /**
+         * Saves all interviews to local storage.
+         */
+        function saveToLocalStorage(data) {
+            try {
+                // Convert Date objects to ISO strings before saving to localStorage
+                const serializableData = data.map(item => ({
+                    ...item,
+                    timestamp: item.timestamp instanceof Date ? item.timestamp.toISOString() : item.timestamp
+                }));
+                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(serializableData));
+                console.log("Data saved to localStorage.");
+                // Trigger the mock listener to update the UI
+                updateMockListener();
+            } catch (e) {
+                console.error("Error saving to localStorage:", e);
+            }
+        }
+
+        // Simulates the real-time update of onSnapshot for LocalStorage
+        function updateMockListener() {
+            // Get the data and sort it
+            let fetched = loadFromLocalStorage();
+            allInterviews = fetched.sort((a, b) => {
+                const timeA = new Date(a.timestamp).getTime();
+                const timeB = new Date(b.timestamp).getTime();
+                return timeB - timeA; // Most recent first
+            });
+            
+            // Refresh UI components
+            if (currentView === 'viewInterviews') {
+                renderInterviewSidebar(allInterviews);
+                if (currentSelectedInterviewId) {
+                    const selected = allInterviews.find(i => i.id === currentSelectedInterviewId);
+                    if (selected) {
+                        displayInterviewDetails(selected);
+                    } else {
+                        currentSelectedInterviewId = null;
+                        document.getElementById('interview-details').innerHTML = '<p class="p-8 text-center text-gray-500">Select an interview from the sidebar to view details.</p>';
+                    }
+                }
+            }
+        }
 
         // --- Core Application State Management & Initialization ---
 
@@ -98,6 +163,10 @@
                 targetView.classList.remove('hidden');
                 
                 if (viewName === 'viewInterviews') {
+                    // Always ensure data is loaded/listened to before rendering
+                    if (useLocalStorage) {
+                        updateMockListener(); // Load/sort local data
+                    }
                     renderInterviewSidebar(allInterviews);
 
                     if (!currentSelectedInterviewId || !allInterviews.find(i => i.id === currentSelectedInterviewId)) {
@@ -114,30 +183,29 @@
         async function startApplication() {
             document.getElementById('loading-indicator').classList.remove('hidden');
             document.getElementById('app-container').classList.add('hidden');
+            const errorDiv = document.getElementById('firebase-error');
 
             try {
-                // 1. Critical Check: Ensure config is available after initial checks
+                // 1. Critical Check: Try to initialize Firebase
                 if (!firebaseConfig) {
-                    throw new Error("Firebase configuration is unavailable or invalid JSON. Check console for details.");
+                    throw new Error("Firebase configuration is unavailable. Switching to Local Storage.");
                 }
 
-                document.getElementById('firebase-error').classList.add('hidden'); // Clear previous errors
-
-                // 2. Initialize Firebase Services
+                // --- FIREBASE INITIALIZATION ---
+                errorDiv.classList.add('hidden');
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
+                useLocalStorage = false;
 
-                // 3. Authenticate (NON-BLOCKING promise chain)
                 const signinPromise = (initialAuthToken)
                     ? signInWithCustomToken(auth, initialAuthToken)
-                    : signInAnonymously(auth); // Fallback to Anonymous sign-in 
+                    : signInAnonymously(auth);
 
                 signinPromise.catch(e => {
                     console.error("Authentication failed during sign-in attempt:", e.message);
                 });
 
-                // 4. Listen for Authentication State Changes
                 onAuthStateChanged(auth, (user) => {
                     authReady = true;
                     document.getElementById('loading-indicator').classList.add('hidden');
@@ -145,33 +213,37 @@
 
                     if (user) {
                         userId = user.uid;
-                        // Define the collection path for private user data
                         interviewsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/interview_sessions`);
                         document.getElementById('auth-status').textContent = `User ID: ${userId}`;
-                        
-                        listenForInterviews(); // Start listening to data
+                        listenForInterviews(); // Start listening to Firestore
                     } else {
+                        // This case means Firebase initialization succeeded, but authentication failed.
                         userId = null;
                         interviewsCollectionRef = null;
                         document.getElementById('auth-status').textContent = 'Authentication Failed.';
-                        
-                        // Display error prominently
-                        const errorDiv = document.getElementById('firebase-error');
                         errorDiv.classList.remove('hidden');
                         errorDiv.textContent = 'ERROR: Database access denied. Check console for Firebase permissions/security rule issues.';
                     }
                 });
 
             } catch (error) {
-                console.log("--- Critical Application Initialization Error ---");
-                console.error(error);
+                // --- LOCAL STORAGE FALLBACK ---
+                console.warn("--- Switching to Local Storage Mode ---");
+                console.warn(error.message);
+                
+                useLocalStorage = true;
+                authReady = true; // Mock authentication success
+                userId = 'LOCAL_USER'; // Mock user ID for local storage
                 
                 document.getElementById('loading-indicator').classList.add('hidden');
                 document.getElementById('app-container').classList.remove('hidden');
-
-                const errorDiv = document.getElementById('firebase-error');
+                
                 errorDiv.classList.remove('hidden');
-                errorDiv.textContent = `CRITICAL INITIALIZATION ERROR: ${error.message}. Please check the console for more details.`;
+                errorDiv.textContent = `CRITICAL ERROR: ${error.message}. Running in Local Storage Mode (data is saved locally only).`;
+                document.getElementById('auth-status').textContent = `User ID: ${userId} (Local Storage Mode)`;
+                
+                // Load initial data and set up mock listener
+                listenForInterviews(); 
             }
         }
         
@@ -181,9 +253,9 @@
             const errorEl = document.getElementById('login-error');
             const loginButton = document.getElementById('login-button');
 
-            // Block UI if Firebase failed to initialize
+            // Block UI if waiting for Firebase auth or if in LS mode and initial load hasn't completed
             if (!authReady || !userId) {
-                errorEl.textContent = 'System offline. Waiting for database connection...';
+                errorEl.textContent = 'System connecting...';
                 errorEl.classList.remove('hidden');
                 return;
             }
@@ -192,7 +264,6 @@
             loginButton.textContent = 'Logging In...';
             loginButton.disabled = true;
 
-            // Simulate login process delay
             setTimeout(() => {
                 if (username === MOCK_USERNAME && password === MOCK_PASSWORD) {
                     errorEl.classList.add('hidden');
@@ -208,50 +279,196 @@
             }, 500);
         };
 
-        // --- CRUD Operations (Firestore ONLY) ---
+        // --- Persistence Operations (Unified Interface) ---
 
         /**
-         * Sets up the real-time listener for the interviews collection (Firestore).
+         * Sets up the real-time listener (Firestore or LocalStorage).
          */
         function listenForInterviews() {
-            if (!interviewsCollectionRef) return; // Wait for authentication
+            // Clear any existing listeners/intervals
+            if (snapshotListener) { snapshotListener(); snapshotListener = null; }
+            if (mockDataInterval) { clearInterval(mockDataInterval); mockDataInterval = null; }
 
-            // Data is sorted by timestamp client-side as orderBy is avoided
-            const q = query(interviewsCollectionRef); 
-
-            onSnapshot(q, (snapshot) => {
-                const fetchedInterviews = [];
-                snapshot.forEach((doc) => {
-                    fetchedInterviews.push({ id: doc.id, ...doc.data() });
-                });
-                
-                // Sort by timestamp (most recent first) after fetching
-                allInterviews = fetchedInterviews.sort((a, b) => {
-                    const timeA = toFirestoreTimestamp(a.timestamp).toMillis();
-                    const timeB = toFirestoreTimestamp(b.timestamp).toMillis();
-                    return timeB - timeA;
-                });
-                
-                // When data updates, refresh the relevant UI parts
-                if (currentView === 'viewInterviews') {
-                    renderInterviewSidebar(allInterviews);
-                    if (currentSelectedInterviewId) {
-                        const selected = allInterviews.find(i => i.id === currentSelectedInterviewId);
-                        if (selected) {
-                            displayInterviewDetails(selected);
-                        } else {
-                            // If the selected interview was just deleted
-                            currentSelectedInterviewId = null;
-                            document.getElementById('interview-details').innerHTML = '<p class="p-8 text-center text-gray-500">Select an interview from the sidebar to view details.</p>';
+            if (useLocalStorage) {
+                // Initial load for Local Storage
+                updateMockListener();
+            } else if (interviewsCollectionRef) {
+                // Setup Firestore listener
+                const q = query(interviewsCollectionRef); 
+                snapshotListener = onSnapshot(q, (snapshot) => {
+                    const fetchedInterviews = [];
+                    snapshot.forEach((doc) => {
+                        fetchedInterviews.push({ id: doc.id, ...doc.data() });
+                    });
+                    
+                    // Sort by timestamp (most recent first) after fetching
+                    allInterviews = fetchedInterviews.sort((a, b) => {
+                        const timeA = toFirestoreTimestamp(a.timestamp).toMillis();
+                        const timeB = toFirestoreTimestamp(b.timestamp).toMillis();
+                        return timeB - timeA;
+                    });
+                    
+                    if (currentView === 'viewInterviews') {
+                        renderInterviewSidebar(allInterviews);
+                        // Re-display details if selected interview exists
+                        if (currentSelectedInterviewId) {
+                            const selected = allInterviews.find(i => i.id === currentSelectedInterviewId);
+                            if (selected) { displayInterviewDetails(selected); }
                         }
                     }
-                }
-            }, (error) => {
-                console.error("Error fetching interviews (onSnapshot failed):", error);
-                document.getElementById('interview-sidebar').innerHTML = `<p class="p-4 text-red-500">Error loading data. Check console for Firebase permissions/index errors.</p>`;
-            });
+                }, (error) => {
+                    console.error("Error fetching interviews (onSnapshot failed):", error);
+                    document.getElementById('interview-sidebar').innerHTML = `<p class="p-4 text-red-500">Error loading data. Check console.</p>`;
+                });
+            }
         }
+
+        window.submitNewInterview = async (event) => {
+            event.preventDefault();
+            const form = document.getElementById('new-interview-form');
+            const submitButton = document.getElementById('submit-interview-button');
+            const alertEl = document.getElementById('newInterviewAlert');
+            
+            if (!authReady || !userId) {
+                alertEl.textContent = useLocalStorage ? 'Local Storage not ready.' : 'Database connection error.';
+                alertEl.classList.remove('hidden');
+                return;
+            }
+
+            const getField = (id) => document.getElementById(id).value.trim();
+
+            const teacherName = getField('new-teacher-name');
+            const roleApplyingFor = getField('new-role-applying');
+            
+            const questions = [
+                { question: "Where do you see yourself in 6 months time?", notes: getField('q3-notes') },
+                { question: "Can you tell me a time where you had to work as a team with new people?", notes: getField('q4-notes') },
+                { question: "Can you tell me a time where you was under pressure?", notes: getField('q5-notes') },
+                { question: "Do you have any additional learning needs we may need to be aware of so we can make your time here better?", notes: getField('q6-notes') }
+            ];
+
+            if (!teacherName || !roleApplyingFor || questions.some(q => !q.notes)) {
+                alertEl.textContent = 'Please fill out all required fields (Name, Role, and Notes for all 4 questions).';
+                alertEl.classList.remove('hidden');
+                setTimeout(() => alertEl.classList.add('hidden'), 3000);
+                return;
+            }
+            
+            alertEl.classList.add('hidden');
+            submitButton.textContent = 'Submitting...';
+            submitButton.disabled = true;
+            
+            const newInterviewData = {
+                teacherName: teacherName,
+                roleApplyingFor: roleApplyingFor,
+                notes: questions,
+                timestamp: new Date()
+            };
+
+            try {
+                let newDocId;
+
+                if (useLocalStorage) {
+                    newDocId = crypto.randomUUID();
+                    allInterviews.push({ id: newDocId, ...newInterviewData });
+                    saveToLocalStorage(allInterviews);
+                } else {
+                    const docRef = await addDoc(interviewsCollectionRef, newInterviewData);
+                    newDocId = docRef.id;
+                }
+
+                // Clear the form and navigate to the view interviews page
+                form.reset();
+                currentSelectedInterviewId = newDocId; // Select the newly created interview
+                submitButton.textContent = 'Submitted!';
+                setTimeout(() => {
+                    submitButton.textContent = 'Submit Interview';
+                    submitButton.disabled = false;
+                    window.setView('viewInterviews'); 
+                }, 1000);
+
+            } catch (e) {
+                console.error("Error adding interview session: ", e);
+                submitButton.textContent = 'Submission Failed!';
+                setTimeout(() => {
+                    submitButton.textContent = 'Submit Interview';
+                    submitButton.disabled = false;
+                }, 2000);
+            }
+        };
+
+        window.updateInterviewNote = async (interviewId, noteIndex) => {
+            if (!authReady || !userId) {
+                console.error("Persistence layer not ready. Cannot update.");
+                return;
+            }
+
+            const notesInput = document.getElementById(`edit-notes-input-${interviewId}-${noteIndex}`);
+            const updatedNotes = notesInput.value.trim();
+            
+            if (!updatedNotes) return console.error('Notes cannot be empty.');
+
+            const interviewToUpdate = allInterviews.find(i => i.id === interviewId);
+            if (!interviewToUpdate) return console.error('Interview not found for update.');
+
+            const updatedNotesArray = [...interviewToUpdate.notes];
+            updatedNotesArray[noteIndex].notes = updatedNotes;
+            
+            const newTimestamp = new Date();
+
+            try {
+                if (useLocalStorage) {
+                    // Update in local array, then save
+                    const interviewIndex = allInterviews.findIndex(i => i.id === interviewId);
+                    if (interviewIndex !== -1) {
+                        allInterviews[interviewIndex].notes = updatedNotesArray;
+                        allInterviews[interviewIndex].timestamp = newTimestamp;
+                        saveToLocalStorage(allInterviews); 
+                    }
+                } else {
+                    // Update in Firestore
+                    const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, interviewId);
+                    await updateDoc(interviewRef, {
+                        notes: updatedNotesArray,
+                        timestamp: newTimestamp
+                    });
+                }
+                
+                const safeUpdatedNotes = updatedNotes.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/"/g, '\\"');
+                window.toggleNoteEdit(interviewId, noteIndex, safeUpdatedNotes); 
+
+            } catch (e) {
+                console.error("Error updating interview note: ", e);
+            }
+        };
+
+        window.deleteInterview = async (docId) => {
+            window.hideDeleteConfirmation();
+
+            if (!authReady || !userId) {
+                console.error("Persistence layer not ready. Cannot delete.");
+                return;
+            }
+            
+            try {
+                if (useLocalStorage) {
+                    // Filter out the deleted item and save
+                    allInterviews = allInterviews.filter(i => i.id !== docId);
+                    saveToLocalStorage(allInterviews);
+                    currentSelectedInterviewId = null;
+                } else {
+                    // Delete from Firestore
+                    const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, docId);
+                    await deleteDoc(interviewRef);
+                }
+            } catch (e) {
+                console.error("Error deleting interview: ", e);
+            }
+        };
+
         
+        // --- UI Rendering Functions (No change here, they call the unified methods) ---
+
         /**
          * Renders the list of interviews in the sidebar.
          */
@@ -292,17 +509,14 @@
         function displayInterviewDetails(interview) {
             const detailsEl = document.getElementById('interview-details');
             
-            // Function to sanitize notes content for JS string passing (for the edit function)
             const escapeString = (str) => String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/"/g, '\\"');
 
             const notesHtml = interview.notes.map((note, index) => {
-                // Escape the notes content for safe passing to the inline JS handler
                 const safeNotes = escapeString(note.notes);
                 return `
                 <div class="mb-6 p-4 bg-gray-50 rounded-xl border border-gray-200 shadow-sm">
                     <h4 class="text-md font-semibold text-purple-700 mb-1">Q${index + 3}: ${note.question}</h4>
                     <div id="note-display-${interview.id}-${index}" class="text-gray-700 whitespace-pre-wrap mt-2">${note.notes}</div>
-                    <!-- Edit form placeholder -->
                     <div id="note-edit-${interview.id}-${index}" class="hidden mt-2"></div>
                     <button onclick="window.toggleNoteEdit('${interview.id}', ${index}, '${safeNotes}')" 
                             class="text-xs font-medium bg-indigo-500 text-white px-3 py-1.5 rounded-full hover:bg-indigo-600 transition mt-3">
@@ -335,10 +549,8 @@
             const displayEl = document.getElementById(`note-display-${interviewId}-${noteIndex}`);
             const editEl = document.getElementById(`note-edit-${interviewId}-${noteIndex}`);
             
-            // Unescape notes for textarea display
             const notesToDisplay = currentNotes.replace(/\\n/g, '\n').replace(/\\'/g, "'").replace(/\\"/g, '"');
 
-            // If the edit form is currently hidden, show it (Start Editing)
             if (editEl.classList.contains('hidden')) {
                 displayEl.classList.add('hidden');
                 editEl.classList.remove('hidden');
@@ -355,49 +567,10 @@
                     </div>
                 `;
             } else {
-                // If the edit form is visible, hide it (Cancel Editing / Finish Saving)
                 displayEl.classList.remove('hidden');
                 editEl.classList.add('hidden');
-                // Re-render the display element with current (potentially saved) notes
                 displayEl.innerHTML = notesToDisplay;
                 editEl.innerHTML = '';
-            }
-        };
-
-        window.updateInterviewNote = async (interviewId, noteIndex) => {
-            if (!interviewsCollectionRef || !userId) {
-                console.error("Database connection not ready. Cannot update.");
-                return;
-            }
-
-            const notesInput = document.getElementById(`edit-notes-input-${interviewId}-${noteIndex}`);
-            const updatedNotes = notesInput.value.trim();
-            
-            if (!updatedNotes) return console.error('Notes cannot be empty.');
-
-            const interviewToUpdate = allInterviews.find(i => i.id === interviewId);
-            if (!interviewToUpdate) return console.error('Interview not found for update.');
-
-            const updatedNotesArray = [...interviewToUpdate.notes];
-            // Ensure the new note is stored correctly
-            updatedNotesArray[noteIndex].notes = updatedNotes;
-            
-            const newTimestamp = new Date();
-
-            try {
-                const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, interviewId);
-                await updateDoc(interviewRef, {
-                    notes: updatedNotesArray,
-                    timestamp: newTimestamp // Update timestamp to bring to top of list
-                });
-                
-                // Hide the edit form after successful update
-                // The onSnapshot listener will handle the full UI refresh.
-                const safeUpdatedNotes = updatedNotes.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/"/g, '\\"');
-                window.toggleNoteEdit(interviewId, noteIndex, safeUpdatedNotes); 
-
-            } catch (e) {
-                console.error("Error updating interview note (Firebase): ", e);
             }
         };
 
@@ -409,91 +582,6 @@
         window.hideDeleteConfirmation = () => {
             document.getElementById('delete-modal').classList.add('hidden');
         };
-
-        window.deleteInterview = async (docId) => {
-            window.hideDeleteConfirmation(); // Hide modal immediately
-
-            if (!interviewsCollectionRef || !userId) {
-                console.error("Database connection not ready. Cannot delete.");
-                return;
-            }
-            
-            try {
-                const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, docId);
-                await deleteDoc(interviewRef);
-                // The onSnapshot listener will automatically update the UI
-            } catch (e) {
-                console.error("Error deleting interview (Firebase): ", e);
-            }
-        };
-
-        window.submitNewInterview = async (event) => {
-            event.preventDefault();
-            const form = document.getElementById('new-interview-form');
-            const submitButton = document.getElementById('submit-interview-button');
-            const alertEl = document.getElementById('newInterviewAlert');
-            
-            if (!interviewsCollectionRef || !userId) {
-                console.error("Database connection is not established. Cannot submit data.");
-                alertEl.textContent = 'Database connection error. Please refresh and try again.';
-                alertEl.classList.remove('hidden');
-                return;
-            }
-
-            const getField = (id) => document.getElementById(id).value.trim();
-
-            const teacherName = getField('new-teacher-name');
-            const roleApplyingFor = getField('new-role-applying');
-            
-            // Ensure data structure matches the design request
-            const questions = [
-                { question: "Where do you see yourself in 6 months time?", notes: getField('q3-notes') },
-                { question: "Can you tell me a time where you had to work as a team with new people?", notes: getField('q4-notes') },
-                { question: "Can you tell me a time where you was under pressure?", notes: getField('q5-notes') },
-                { question: "Do you have any additional learning needs we may need to be aware of so we can make your time here better?", notes: getField('q6-notes') }
-            ];
-
-            if (!teacherName || !roleApplyingFor || questions.some(q => !q.notes)) {
-                // Custom alert message since window.alert is forbidden
-                alertEl.textContent = 'Please fill out all required fields (Name, Role, and Notes for all 4 questions).';
-                alertEl.classList.remove('hidden');
-                setTimeout(() => alertEl.classList.add('hidden'), 3000);
-                return;
-            }
-            
-            alertEl.classList.add('hidden');
-            submitButton.textContent = 'Submitting...';
-            submitButton.disabled = true;
-            
-            const newInterviewData = {
-                teacherName: teacherName,
-                roleApplyingFor: roleApplyingFor,
-                notes: questions,
-                timestamp: new Date() // Firestore automatically converts Date objects to Timestamps
-            };
-
-            try {
-                await addDoc(interviewsCollectionRef, newInterviewData);
-
-                // Clear the form and navigate to the view interviews page
-                form.reset();
-                submitButton.textContent = 'Submitted!';
-                setTimeout(() => {
-                    submitButton.textContent = 'Submit Interview';
-                    submitButton.disabled = false;
-                    window.setView('viewInterviews'); // Navigate directly to show the new entry
-                }, 1000);
-
-            } catch (e) {
-                console.error("Error adding interview session: ", e);
-                submitButton.textContent = 'Submission Failed!';
-                setTimeout(() => {
-                    submitButton.textContent = 'Submit Interview';
-                    submitButton.disabled = false;
-                }, 2000);
-            }
-        };
-
 
         // Initialize App when the script loads
         startApplication();
