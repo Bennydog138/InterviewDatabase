@@ -15,10 +15,19 @@
 
         // IMPORTANT: Global variables provided by the Canvas environment
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        // FIX: Reverted to use the environment variable __firebase_config, which is necessary
-        // for Auth initialization in the Canvas sandbox, resolving the auth/configuration-not-found error.
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // FIX: Using the explicit configuration provided by the user to ensure 'projectId' is present, 
+        // as the environment variable __firebase_config appears to be empty or misconfigured.
+        const firebaseConfig = {
+          apiKey: "AIzaSyBp08uDYjTsjpZ1sP1xgNZ8dd_tVmytEcM",
+          authDomain: "interviewss-e3ed9.firebaseapp.com",
+          projectId: "interviewss-e3ed9",
+          storageBucket: "interviewss-e3ed9.firebasestorage.app",
+          messagingSenderId: "374016275776",
+          appId: "1:374016275776:web:23636a52f3b46ba80576a5",
+          measurementId: "G-N2P4HXBF6E"
+        };
         
         // Hardcoded credentials for the design request (client-side login simulation)
         const MOCK_USERNAME = "staff";
@@ -36,6 +45,7 @@
         // --- Core Application State Management ---
 
         let currentView = 'login'; // 'login', 'dashboard', 'newInterview', 'viewInterviews'
+        let authReady = false; // Flag to track when auth has completed its initial check
 
         /**
          * Switches the active view of the application.
@@ -70,38 +80,62 @@
 
         async function initializeFirebase() {
             try {
+                // Check if the configuration has the minimum required field
+                if (!firebaseConfig.projectId) {
+                    throw new Error("Firebase configuration is missing the 'projectId'. Cannot initialize.");
+                }
+
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
 
-                // Authenticate using the provided token or anonymously
+                // Authenticate using the provided token or anonymously (NON-BLOCKING)
+                // We use .catch() to ensure errors don't crash initializeFirebase, 
+                // and rely on onAuthStateChanged to handle the final state.
                 if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
+                    signInWithCustomToken(auth, initialAuthToken)
+                        .then(() => console.log("Signed in with custom token."))
+                        .catch(e => {
+                            console.warn("Custom token sign-in failed:", e.message, "Attempting anonymous sign-in as fallback.");
+                            signInAnonymously(auth).catch(err => {
+                                console.error("Anonymous sign-in also failed:", err.message);
+                            });
+                        });
                 } else {
-                    await signInAnonymously(auth);
+                    // If no token provided, sign in anonymously
+                    signInAnonymously(auth).catch(e => {
+                        console.error("Anonymous sign-in failed:", e.message);
+                    });
                 }
 
                 // Listen for authentication state changes
                 onAuthStateChanged(auth, (user) => {
+                    authReady = true;
+
                     if (user) {
                         userId = user.uid;
                         // Construct the private data path for this user and app
                         interviewsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/interview_sessions`);
                         document.getElementById('auth-status').textContent = `User ID: ${userId}`;
-                        // Keep in login view until user logs in (mocked)
-                        document.getElementById('loading-indicator').classList.add('hidden');
-                        document.getElementById('app-container').classList.remove('hidden');
-
                         listenForInterviews(); // Start listening to data immediately
                     } else {
                         userId = null;
-                        document.getElementById('auth-status').textContent = 'Authenticating...';
+                        document.getElementById('auth-status').textContent = 'Signed out / Authentication failed.';
+                        // Note: If authentication fails, the application still proceeds using the mock login flow.
                     }
+
+                    // Hide loading indicator and show app container once auth state is checked
+                    document.getElementById('loading-indicator').classList.add('hidden');
+                    document.getElementById('app-container').classList.remove('hidden');
                 });
 
             } catch (error) {
                 console.error("Error initializing Firebase or signing in:", error);
-                document.getElementById('auth-status').textContent = `Authentication Error: ${error.message}`;
+                document.getElementById('auth-status').textContent = `Initialization Error: ${error.message}`;
+                
+                // Ensure UI is visible even if initialization fails after auth check (redundant check)
+                document.getElementById('loading-indicator').classList.add('hidden');
+                document.getElementById('app-container').classList.remove('hidden');
             }
         }
         
@@ -152,9 +186,6 @@
             if (!interviewsCollectionRef) return;
 
             // Query interviews, ordered by timestamp (newest first)
-            // NOTE: Firestore queries are not sorted in Javascript to avoid index creation issues in Canvas.
-            // Data will be fetched and sorted in JS if needed, but for simple time-based display, we use Firestore's orderBy
-            // which requires an index on the 'timestamp' field. If this throws an error, we rely on in-memory sorting.
             const q = query(interviewsCollectionRef, orderBy('timestamp', 'desc'));
 
             onSnapshot(q, (snapshot) => {
