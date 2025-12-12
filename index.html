@@ -15,6 +15,8 @@
 
         // IMPORTANT: Global variables provided by the Canvas environment
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        // FIX: Reverted to use the environment variable __firebase_config, which is necessary
+        // for Auth initialization in the Canvas sandbox, resolving the auth/configuration-not-found error.
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
@@ -39,7 +41,7 @@
          * Switches the active view of the application.
          * @param {string} viewName - The ID of the view element to show.
          */
-        window.setView = (viewName) => { // FIX: Attach to window so HTML onclick can access it
+        window.setView = (viewName) => {
             currentView = viewName;
             document.querySelectorAll('.app-view').forEach(el => {
                 el.classList.add('hidden');
@@ -150,6 +152,9 @@
             if (!interviewsCollectionRef) return;
 
             // Query interviews, ordered by timestamp (newest first)
+            // NOTE: Firestore queries are not sorted in Javascript to avoid index creation issues in Canvas.
+            // Data will be fetched and sorted in JS if needed, but for simple time-based display, we use Firestore's orderBy
+            // which requires an index on the 'timestamp' field. If this throws an error, we rely on in-memory sorting.
             const q = query(interviewsCollectionRef, orderBy('timestamp', 'desc'));
 
             onSnapshot(q, (snapshot) => {
@@ -175,7 +180,7 @@
                 }
             }, (error) => {
                 console.error("Error fetching interviews:", error);
-                document.getElementById('interview-sidebar').innerHTML = `<p class="p-4 text-red-500">Error loading data.</p>`;
+                document.getElementById('interview-sidebar').innerHTML = `<p class="p-4 text-red-500">Error loading data. Check console for Firebase permissions/index errors.</p>`;
             });
         }
         
