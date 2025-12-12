@@ -8,7 +8,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Load Firebase SDKs -->
     <script type="module">
-        // Import Firebase modules
+        // Import Firebase modules - required for both environments, but only executed if config is available
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -17,40 +17,92 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
-        // FIX: Reverting to use the provided __firebase_config environment variable, 
-        // which is the official source of truth in the platform. The explicit hardcoding 
-        // was likely conflicting with the sandbox environment's setup and causing the Auth errors.
         let firebaseConfig = null;
+        let isFirebaseEnvironment = false; // New flag for environment detection
+
+        // Attempt to parse config: If this fails (e.g., in local hosting where __firebase_config is undefined), we default to local storage mode.
         try {
-            firebaseConfig = JSON.parse(__firebase_config);
+            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+                firebaseConfig = JSON.parse(__firebase_config);
+                // Check for a required field to confirm validity
+                if (firebaseConfig && firebaseConfig.projectId) {
+                    isFirebaseEnvironment = true;
+                }
+            } else {
+                console.warn("Firebase configuration not found. Running in local persistence mode.");
+            }
         } catch (e) {
-            console.error("Critical: Failed to parse __firebase_config. Firestore operations will fail unless this is corrected.");
-            // Define a placeholder config to prevent crash in initializeApp
-            firebaseConfig = { projectId: 'missing-config-error' }; 
+            console.error("Critical: Failed to parse __firebase_config. Switching to local persistence mode.", e);
         }
         
         // Hardcoded credentials for the design request (client-side login simulation)
         const MOCK_USERNAME = "staff";
         const MOCK_PASSWORD = "password123";
 
-        let db;
-        let auth;
+        let db = null;
+        let auth = null;
         let userId = null;
         let interviewsCollectionRef = null;
         let allInterviews = []; // Store fetched interviews
         let currentSelectedInterviewId = null;
 
-        setLogLevel('debug');
+        if (isFirebaseEnvironment) {
+            setLogLevel('debug');
+        }
 
-        // --- Core Application State Management ---
-
-        let currentView = 'login'; // 'login', 'dashboard', 'newInterview', 'viewInterviews'
-        let authReady = false; // Flag to track when auth has completed its initial check
+        // --- Local Storage Fallback Functions ---
 
         /**
-         * Switches the active view of the application.
-         * @param {string} viewName - The ID of the view element to show.
+         * Loads interviews from local storage and updates the in-memory array.
          */
+        function loadLocalInterviews() {
+            const data = localStorage.getItem('localInterviews');
+            if (data) {
+                allInterviews = JSON.parse(data);
+            } else {
+                allInterviews = [];
+            }
+            // Sort by timestamp (newest first). Note: Dates are stored as ISO strings.
+            allInterviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            
+            // Trigger UI refresh if needed
+            if (currentView === 'viewInterviews' || currentView === 'dashboard') {
+                renderInterviewSidebar(allInterviews);
+            }
+        }
+
+        /**
+         * Saves the current in-memory array to local storage.
+         */
+        function saveLocalInterviews() {
+            // Sort before saving to maintain order consistency (newest first)
+            allInterviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            localStorage.setItem('localInterviews', JSON.stringify(allInterviews));
+            // Simulate real-time update refresh
+            if (currentView === 'viewInterviews') {
+                renderInterviewSidebar(allInterviews);
+            }
+        }
+
+        /**
+         * Converts timestamp to a readable date string (handles Date objects and ISO strings for local mode).
+         */
+        function formatTimestamp(timestamp) {
+            if (timestamp && timestamp.toDate) {
+                return timestamp.toDate().toLocaleString(); // Firebase Timestamp
+            }
+            if (typeof timestamp === 'string') {
+                return new Date(timestamp).toLocaleString(); // Local ISO String
+            }
+            return 'Date Unknown';
+        }
+
+
+        // --- Core Application State Management & Initialization ---
+
+        let currentView = 'login'; 
+        let authReady = false; 
+
         window.setView = (viewName) => {
             currentView = viewName;
             document.querySelectorAll('.app-view').forEach(el => {
@@ -60,88 +112,78 @@
             if (targetView) {
                 targetView.classList.remove('hidden');
                 
-                // Special actions for view transitions
                 if (viewName === 'viewInterviews') {
-                    // Re-render sidebar when entering the viewInterviews page
+                    // Load or refresh data
+                    if (!isFirebaseEnvironment) loadLocalInterviews();
+                    
                     renderInterviewSidebar(allInterviews);
-                    // Clear details if no interview is selected or if navigating from another page
+
                     if (!currentSelectedInterviewId || !allInterviews.find(i => i.id === currentSelectedInterviewId)) {
                         document.getElementById('interview-details').innerHTML = '<p class="p-8 text-center text-gray-500">Select an interview from the sidebar to view details.</p>';
                     }
                 }
                 if (viewName === 'dashboard') {
-                    // Clear the form when returning to the dashboard
                     document.getElementById('new-interview-form').reset();
                 }
             }
         }
 
-        // --- Authentication & Initialization ---
-
-        async function initializeFirebase() {
+        // Renamed from initializeApp to startApplication to prevent "already been declared" error
+        async function startApplication() {
             try {
-                // Check if the configuration has the minimum required field
-                if (!firebaseConfig.projectId) {
-                    throw new Error("Firebase configuration is missing the 'projectId'. Cannot initialize.");
-                }
+                if (isFirebaseEnvironment) {
+                    console.log("Initializing Firebase/Firestore...");
+                    const app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
 
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
+                    // Authenticate (NON-BLOCKING)
+                    const signinPromise = initialAuthToken
+                        ? signInWithCustomToken(auth, initialAuthToken)
+                        : signInAnonymously(auth);
 
-                // Authenticate using the provided token or anonymously (NON-BLOCKING)
-                // We use .catch() to ensure authentication errors don't crash initializeFirebase, 
-                // and rely on onAuthStateChanged to handle the final state.
-                if (initialAuthToken) {
-                    signInWithCustomToken(auth, initialAuthToken)
-                        .then(() => console.log("Signed in with custom token."))
-                        .catch(e => {
-                            console.warn("Custom token sign-in failed:", e.message, "Attempting anonymous sign-in as fallback.");
-                            signInAnonymously(auth).catch(err => {
-                                console.error("Anonymous sign-in also failed:", err.message);
-                            });
-                        });
-                } else {
-                    // If no token provided, sign in anonymously
-                    signInAnonymously(auth).catch(e => {
-                        console.error("Anonymous sign-in failed:", e.message);
+                    signinPromise.catch(e => {
+                        console.error("Authentication failed:", e.message);
                     });
-                }
 
-                // Listen for authentication state changes
-                onAuthStateChanged(auth, (user) => {
+                    // Listen for authentication state changes
+                    onAuthStateChanged(auth, (user) => {
+                        authReady = true;
+                        if (user) {
+                            userId = user.uid;
+                            interviewsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/interview_sessions`);
+                            document.getElementById('auth-status').textContent = `User ID: ${userId}`;
+                            listenForInterviews(); // Start listening to data
+                        } else {
+                            userId = null;
+                            document.getElementById('auth-status').textContent = 'Signed out / Auth Failed (Firebase Mode)';
+                        }
+                        
+                        document.getElementById('loading-indicator').classList.add('hidden');
+                        document.getElementById('app-container').classList.remove('hidden');
+                    });
+
+                } else {
+                    // Local Storage Fallback Mode
+                    userId = 'local_user_id';
                     authReady = true;
+                    console.warn("Running in Local Persistence Mode. Data stored in browser's localStorage.");
+                    loadLocalInterviews(); 
+                    document.getElementById('auth-status').textContent = 'Local Mode: Using localStorage';
 
-                    if (user) {
-                        userId = user.uid;
-                        // Construct the private data path for this user and app
-                        interviewsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/interview_sessions`);
-                        document.getElementById('auth-status').textContent = `User ID: ${userId}`;
-                        listenForInterviews(); // Start listening to data immediately
-                    } else {
-                        userId = null;
-                        document.getElementById('auth-status').textContent = 'Signed out / Authentication failed.';
-                        // Note: If authentication fails, the application still proceeds using the mock login flow.
-                    }
-
-                    // Hide loading indicator and show app container once auth state is checked
                     document.getElementById('loading-indicator').classList.add('hidden');
                     document.getElementById('app-container').classList.remove('hidden');
-                });
+                }
 
             } catch (error) {
-                console.error("Error initializing Firebase or signing in:", error);
+                console.error("Error during App Initialization:", error);
                 document.getElementById('auth-status').textContent = `Initialization Error: ${error.message}`;
                 
-                // Ensure UI is visible even if initialization fails after auth check (redundant check)
                 document.getElementById('loading-indicator').classList.add('hidden');
                 document.getElementById('app-container').classList.remove('hidden');
             }
         }
         
-        /**
-         * Simulates a client-side login using hardcoded credentials.
-         */
         window.mockLogin = () => {
             const username = document.getElementById('login-username').value;
             const password = document.getElementById('login-password').value;
@@ -167,25 +209,20 @@
             }, 500);
         };
 
-        // --- Firestore Operations and Listeners ---
+        // --- CRUD Operations (Dual Mode) ---
 
         /**
-         * Converts Firestore timestamp to a readable date string.
-         */
-        function formatTimestamp(timestamp) {
-            if (timestamp && timestamp.toDate) {
-                return timestamp.toDate().toLocaleString();
-            }
-            return 'Date Unknown';
-        }
-
-        /**
-         * Sets up the real-time listener for the interviews collection.
+         * Sets up the real-time listener for the interviews collection (Firestore) 
+         * or performs an initial local load (Local Storage).
          */
         function listenForInterviews() {
+            if (!isFirebaseEnvironment) {
+                loadLocalInterviews();
+                return;
+            }
+            
             if (!interviewsCollectionRef) return;
 
-            // Query interviews, ordered by timestamp (newest first)
             const q = query(interviewsCollectionRef, orderBy('timestamp', 'desc'));
 
             onSnapshot(q, (snapshot) => {
@@ -194,16 +231,13 @@
                     allInterviews.push({ id: doc.id, ...doc.data() });
                 });
                 
-                // If we are on the viewInterviews page, update the sidebar
                 if (currentView === 'viewInterviews') {
                     renderInterviewSidebar(allInterviews);
-                    // Re-render selected details if current interview still exists
                     if (currentSelectedInterviewId) {
                         const selected = allInterviews.find(i => i.id === currentSelectedInterviewId);
                         if (selected) {
                             displayInterviewDetails(selected);
                         } else {
-                            // Selected interview was deleted, clear details
                             currentSelectedInterviewId = null;
                             document.getElementById('interview-details').innerHTML = '<p class="p-8 text-center text-gray-500">Select an interview from the sidebar to view details.</p>';
                         }
@@ -243,9 +277,6 @@
             });
         }
         
-        /**
-         * Selects an interview from the sidebar and displays its details.
-         */
         window.selectInterview = (id) => {
             currentSelectedInterviewId = id;
             const interview = allInterviews.find(i => i.id === id);
@@ -255,13 +286,9 @@
             }
         };
         
-        /**
-         * Displays the content of the selected interview.
-         */
         function displayInterviewDetails(interview) {
             const detailsEl = document.getElementById('interview-details');
             
-            // Generate the notes HTML
             const notesHtml = interview.notes.map((note, index) => `
                 <div class="mb-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
                     <h4 class="text-md font-semibold text-purple-700 mb-1">Q${index + 3}: ${note.question}</h4>
@@ -293,16 +320,12 @@
             `;
         }
 
-        /**
-         * Toggles the edit mode for a specific question's notes within an interview.
-         */
         window.toggleNoteEdit = (interviewId, noteIndex, currentNotes) => {
             const displayEl = document.getElementById(`note-display-${interviewId}-${noteIndex}`);
             const editEl = document.getElementById(`note-edit-${interviewId}-${noteIndex}`);
             const isEditing = editEl.classList.contains('hidden');
 
             if (isEditing) {
-                // Show edit form
                 displayEl.classList.add('hidden');
                 editEl.classList.remove('hidden');
 
@@ -318,77 +341,92 @@
                     </div>
                 `;
             } else {
-                // Hide edit form
                 displayEl.classList.remove('hidden');
                 editEl.classList.add('hidden');
                 editEl.innerHTML = '';
             }
         };
 
-        /**
-         * Updates a single note entry within an interview document.
-         */
         window.updateInterviewNote = async (interviewId, noteIndex) => {
             const notesInput = document.getElementById(`edit-notes-input-${interviewId}-${noteIndex}`);
             const updatedNotes = notesInput.value.trim();
             
-            // NOTE: Replace alert() with a custom modal in production
             if (!updatedNotes) return console.error('Notes cannot be empty.');
 
-            // Find the full interview object
             const interviewToUpdate = allInterviews.find(i => i.id === interviewId);
             if (!interviewToUpdate) return console.error('Interview not found for update.');
 
-            // Create a deep copy of the notes array and update the specific note
             const updatedNotesArray = [...interviewToUpdate.notes];
             updatedNotesArray[noteIndex].notes = updatedNotes;
+            
+            const newTimestamp = new Date();
 
-            try {
-                const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, interviewId);
-                await updateDoc(interviewRef, {
-                    notes: updatedNotesArray,
-                    timestamp: new Date() // Update timestamp to bring to top
-                });
-                
-                // The onSnapshot listener will refresh the UI
-            } catch (e) {
-                console.error("Error updating interview note: ", e);
+            if (isFirebaseEnvironment) {
+                try {
+                    const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, interviewId);
+                    await updateDoc(interviewRef, {
+                        notes: updatedNotesArray,
+                        timestamp: newTimestamp // Update timestamp to bring to top
+                    });
+                } catch (e) {
+                    console.error("Error updating interview note (Firebase): ", e);
+                }
+            } else {
+                // Local Storage Update
+                interviewToUpdate.notes = updatedNotesArray;
+                interviewToUpdate.timestamp = newTimestamp.toISOString(); // Use ISO string for local storage
+                saveLocalInterviews();
+                // Re-display immediately as local mode doesn't have a real-time listener
+                displayInterviewDetails(interviewToUpdate); 
             }
         };
 
 
-        /**
-         * Deletes an entire interview session.
-         */
         window.deleteInterview = async (docId) => {
-            // NOTE: Replace confirm() with a custom modal in production
             if (!confirm('Are you sure you want to delete this entire interview session? This cannot be undone.')) {
                  return; 
             }
-            try {
-                const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, docId);
-                await deleteDoc(interviewRef);
-                // The onSnapshot listener handles the UI update and rerendering the sidebar/details
-            } catch (e) {
-                console.error("Error deleting interview: ", e);
+
+            if (isFirebaseEnvironment) {
+                try {
+                    const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, docId);
+                    await deleteDoc(interviewRef);
+                } catch (e) {
+                    console.error("Error deleting interview (Firebase): ", e);
+                }
+            } else {
+                // Local Storage Delete
+                allInterviews = allInterviews.filter(i => i.id !== docId);
+                currentSelectedInterviewId = null;
+                saveLocalInterviews();
+                // Clear details and refresh sidebar
+                document.getElementById('interview-details').innerHTML = '<p class="p-8 text-center text-gray-500">Select an interview from the sidebar to view details.</p>';
+                renderInterviewSidebar(allInterviews);
             }
         };
 
-        /**
-         * Submits the new interview form data to Firestore.
-         */
         window.submitNewInterview = async (event) => {
             event.preventDefault();
             const form = document.getElementById('new-interview-form');
             const submitButton = document.getElementById('submit-interview-button');
             
-            // Helper to get question and notes pairs
+            // Validation for Firebase environment
+            if (isFirebaseEnvironment && !interviewsCollectionRef) {
+                console.error("Database connection is not established. Cannot submit data.");
+                submitButton.textContent = 'DB Error: Try Again';
+                submitButton.disabled = true;
+                setTimeout(() => {
+                    submitButton.textContent = 'Submit Interview';
+                    submitButton.disabled = false;
+                }, 3000);
+                return;
+            }
+
             const getField = (id) => document.getElementById(id).value.trim();
 
             const teacherName = getField('new-teacher-name');
             const roleApplyingFor = getField('new-role-applying');
             
-            // Specific structured questions and their notes
             const questions = [
                 { question: "Where do you see yourself in 6 months time?", notes: getField('q3-notes') },
                 { question: "Can you tell me a time where you had to work as a team with new people?", notes: getField('q4-notes') },
@@ -396,23 +434,33 @@
                 { question: "Do you have any additional learning needs we may need to be aware of so we can make your time here better?", notes: getField('q6-notes') }
             ];
 
-            // Validate all fields are filled
             if (!teacherName || !roleApplyingFor || questions.some(q => !q.notes)) {
-                // NOTE: Replace alert() with a custom modal in production
+                console.warn('Please fill out the Teacher Name, Role, and provide notes for ALL questions.');
                 alert('Please fill out the Teacher Name, Role, and provide notes for ALL questions.');
                 return;
             }
 
             submitButton.textContent = 'Submitting...';
             submitButton.disabled = true;
+            
+            const newInterviewData = {
+                teacherName: teacherName,
+                roleApplyingFor: roleApplyingFor,
+                notes: questions,
+                timestamp: new Date()
+            };
 
             try {
-                await addDoc(interviewsCollectionRef, {
-                    teacherName: teacherName,
-                    roleApplyingFor: roleApplyingFor,
-                    notes: questions, // Save the array of question/notes
-                    timestamp: new Date()
-                });
+                if (isFirebaseEnvironment) {
+                    await addDoc(interviewsCollectionRef, newInterviewData);
+                } else {
+                    // Local Storage Submission
+                    const newId = crypto.randomUUID();
+                    newInterviewData.id = newId;
+                    newInterviewData.timestamp = newInterviewData.timestamp.toISOString(); // Store as ISO string
+                    allInterviews.push(newInterviewData);
+                    saveLocalInterviews();
+                }
 
                 // Clear the form and navigate to the dashboard
                 form.reset();
@@ -434,8 +482,8 @@
         };
 
 
-        // Initialize Firebase when the script loads
-        initializeFirebase();
+        // Initialize App when the script loads
+        startApplication();
 
         // Ensure the initial view is set to login
         document.addEventListener('DOMContentLoaded', () => {
