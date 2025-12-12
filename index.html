@@ -11,24 +11,42 @@
         // Import Firebase modules
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, setLogLevel, Timestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, doc, updateDoc, deleteDoc, setLogLevel, Timestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // IMPORTANT: Global variables provided by the Canvas environment (used or defaults assigned)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
-        let firebaseConfig = null;
+        // --- USER-PROVIDED CONFIGURATION (Used for self-hosting/GitHub Pages) ---
+        const userProvidedConfig = {
+            apiKey: "AIzaSyBp08uDYjTsjpZ1sP1xgNZ8dd_tVmytEcM",
+            authDomain: "interviewss-e3ed9.firebaseapp.com",
+            projectId: "interviewss-e3ed9",
+            storageBucket: "interviewss-e3ed9.firebasestorage.app",
+            messagingSenderId: "374016275776",
+            appId: "1:374016275776:web:23636a52f3b46ba80576a5",
+            measurementId: "G-N2P4HXBF6E"
+        };
 
-        // Attempt to parse config
+        let firebaseConfig = null;
+        let isSelfHosted = false;
+
+        // Determine which configuration to use: Canvas environment (priority) or user-provided config.
         try {
             if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+                // Use Canvas environment config
                 firebaseConfig = JSON.parse(__firebase_config);
+                console.log("Using Canvas environment Firebase configuration.");
             } else {
-                // If config is missing (e.g., local host without environment variables)
-                console.error("CRITICAL ERROR: Firebase configuration (__firebase_config) is undefined. Database operations will fail.");
+                // Use user-provided config (Self-Hosting mode)
+                console.warn("WARNING: Canvas environment config is missing. Using user-provided Firebase configuration for self-hosting.");
+                firebaseConfig = userProvidedConfig;
+                isSelfHosted = true;
             }
         } catch (e) {
-            console.error("CRITICAL ERROR: Failed to parse __firebase_config. Database operations will fail.", e);
+            console.error("CRITICAL ERROR: Failed to determine Firebase configuration. Falling back to user-provided config.", e);
+            firebaseConfig = userProvidedConfig;
+            isSelfHosted = true;
         }
         
         // Hardcoded credentials for the design request (client-side login simulation)
@@ -42,10 +60,9 @@
         let allInterviews = []; // Store fetched interviews
         let currentSelectedInterviewId = null;
 
-        if (firebaseConfig) {
-            // Enable Firebase debug logging
-            setLogLevel('debug');
-        }
+        // Enable Firebase debug logging
+        setLogLevel('debug');
+
 
         // --- Utility Functions ---
 
@@ -63,11 +80,18 @@
          * Converts Date object or ISO string to a Firebase Timestamp object.
          */
         function toFirestoreTimestamp(date) {
-            // Ensures we can call .toDate() on data retrieved from Firestore, or use new Date() before saving.
+            // Checks if it's already a Firestore Timestamp object before trying to create one.
+            if (date && typeof date.toDate === 'function') {
+                return date;
+            }
             if (date instanceof Date) {
                 return Timestamp.fromDate(date);
             }
-            return date; 
+            // If it's a plain object retrieved from a collection list before full conversion (unlikely but safe), treat it as a Timestamp.
+            if (date && date.seconds && date.nanoseconds) {
+                 return new Timestamp(date.seconds, date.nanoseconds);
+            }
+            return new Timestamp(0, 0); // Fallback for safety
         }
 
 
@@ -86,7 +110,6 @@
                 targetView.classList.remove('hidden');
                 
                 if (viewName === 'viewInterviews') {
-                    // Refresh data on view change (handled by onSnapshot)
                     renderInterviewSidebar(allInterviews);
 
                     if (!currentSelectedInterviewId || !allInterviews.find(i => i.id === currentSelectedInterviewId)) {
@@ -95,7 +118,6 @@
                 }
                 if (viewName === 'newInterview') {
                     document.getElementById('new-interview-form').reset();
-                    // Hide any lingering alerts
                     document.getElementById('newInterviewAlert').classList.add('hidden');
                 }
             }
@@ -103,19 +125,23 @@
 
         async function startApplication() {
             try {
-                if (!firebaseConfig) {
-                    throw new Error("Firebase configuration is missing or invalid. Check console for details.");
+                if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey === "AIzaSyBp08uDYjTsjpZ1sP1xgNZ8dd_tVmytEcM") {
+                    // Display a warning if the user is self-hosting but hasn't updated the default provided key.
+                    if (isSelfHosted) {
+                        const errorDiv = document.getElementById('firebase-error');
+                        errorDiv.classList.remove('hidden');
+                        errorDiv.textContent = 'NOTICE: Using user-provided Firebase configuration. Ensure your Firebase project and security rules allow Anonymous or Custom Token sign-in.';
+                    }
                 }
 
-                console.log("Initializing Firebase/Firestore...");
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
 
                 // Authenticate (NON-BLOCKING)
-                const signinPromise = initialAuthToken
+                const signinPromise = (initialAuthToken)
                     ? signInWithCustomToken(auth, initialAuthToken)
-                    : signInAnonymously(auth);
+                    : signInAnonymously(auth); // Fallback to Anonymous sign-in for self-hosting
 
                 signinPromise.catch(e => {
                     console.error("Authentication failed during sign-in attempt:", e.message);
@@ -132,8 +158,8 @@
                         // Define the collection path for private user data
                         interviewsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/interview_sessions`);
                         document.getElementById('auth-status').textContent = `User ID: ${userId}`;
+                        
                         listenForInterviews(); // Start listening to data
-                        document.getElementById('firebase-error').classList.add('hidden');
                     } else {
                         userId = null;
                         interviewsCollectionRef = null;
@@ -142,7 +168,7 @@
                         // Display error prominently
                         const errorDiv = document.getElementById('firebase-error');
                         errorDiv.classList.remove('hidden');
-                        errorDiv.textContent = 'ERROR: Failed to connect to database. Please check console for Firebase config or security rule issues.';
+                        errorDiv.textContent = 'ERROR: Failed to connect to database. Please check console for Firebase permissions/security rule issues.';
                     }
                 });
 
@@ -295,7 +321,7 @@
                     <p class="text-lg text-purple-600 font-medium">${interview.roleApplyingFor}</p>
                     <p class="text-sm text-gray-500 italic">Interview Date: ${formatTimestamp(toFirestoreTimestamp(interview.timestamp))}</p>
                     <div class="mt-4 flex space-x-3">
-                        <button onclick="window.deleteInterview('${interview.id}')" class="text-sm font-medium bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition shadow-md">
+                        <button onclick="window.showDeleteConfirmation('${interview.id}')" class="text-sm font-medium bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition shadow-md">
                             Delete Interview
                         </button>
                         <p class="text-xs text-gray-500 self-end">User ID: ${userId}</p>
@@ -343,7 +369,7 @@
 
         window.updateInterviewNote = async (interviewId, noteIndex) => {
             if (!interviewsCollectionRef || !userId) {
-                console.error("Database connection not ready.");
+                console.error("Database connection not ready. Cannot update.");
                 return;
             }
 
@@ -370,23 +396,31 @@
                 
                 // Hide the edit form after successful update
                 // The onSnapshot listener will handle the full UI refresh.
-                window.toggleNoteEdit(interviewId, noteIndex, updatedNotes); 
+                const safeUpdatedNotes = updatedNotes.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/"/g, '\\"');
+                window.toggleNoteEdit(interviewId, noteIndex, safeUpdatedNotes); 
 
             } catch (e) {
                 console.error("Error updating interview note (Firebase): ", e);
             }
         };
 
+        window.showDeleteConfirmation = (docId) => {
+            document.getElementById('delete-modal').classList.remove('hidden');
+            document.getElementById('confirm-delete-button').onclick = () => window.deleteInterview(docId);
+        };
+
+        window.hideDeleteConfirmation = () => {
+            document.getElementById('delete-modal').classList.add('hidden');
+        };
 
         window.deleteInterview = async (docId) => {
+            window.hideDeleteConfirmation(); // Hide modal immediately
+
             if (!interviewsCollectionRef || !userId) {
                 console.error("Database connection not ready. Cannot delete.");
                 return;
             }
             
-            // CRITICAL FIX: Replaced window.confirm() with immediate action and warning.
-            console.warn(`DELETING Interview session ID: ${docId}. A custom confirmation modal must be implemented to confirm this action.`);
-
             try {
                 const interviewRef = doc(db, `artifacts/${appId}/users/${userId}/interview_sessions`, docId);
                 await deleteDoc(interviewRef);
@@ -533,10 +567,23 @@
     <!-- Main Application Container -->
     <div id="app-container" class="hidden main-card">
         
-        <!-- Global Firebase Error Banner (Visible if auth fails) -->
-        <div id="firebase-error" class="hidden fixed top-0 left-0 right-0 p-3 bg-red-600 text-white text-sm text-center font-bold z-40 rounded-b-lg shadow-xl">
-            <!-- Error message injected here -->
+        <!-- Global Firebase Error/Warning Banner -->
+        <div id="firebase-error" class="hidden fixed top-0 left-0 right-0 p-3 bg-yellow-500 text-gray-800 text-sm text-center font-bold z-40 rounded-b-lg shadow-xl">
+            <!-- Error/Warning message injected here -->
         </div>
+
+        <!-- Delete Confirmation Modal (Replaces window.confirm) -->
+        <div id="delete-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center transition-opacity duration-300">
+            <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
+                <h3 class="text-lg font-bold text-gray-800 mb-4">Confirm Deletion</h3>
+                <p class="text-gray-600 mb-6">Are you sure you want to permanently delete this interview record? This action cannot be undone.</p>
+                <div class="flex justify-end space-x-3">
+                    <button onclick="window.hideDeleteConfirmation()" class="px-4 py-2 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition">Cancel</button>
+                    <button id="confirm-delete-button" class="px-4 py-2 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 transition">Delete</button>
+                </div>
+            </div>
+        </div>
+
 
         <!-- 1. Login View -->
         <div id="login" class="app-view h-screen flex items-center justify-center">
