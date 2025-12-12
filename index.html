@@ -31,22 +31,29 @@
         let firebaseConfig = null;
         let isSelfHosted = false;
 
-        // Determine which configuration to use: Canvas environment (priority) or user-provided config.
-        try {
-            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-                // Use Canvas environment config
+        // --- Configuration Loading Logic (More Robust) ---
+        if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+            try {
+                // 1. Try to use Canvas environment config first
                 firebaseConfig = JSON.parse(__firebase_config);
                 console.log("Using Canvas environment Firebase configuration.");
-            } else {
-                // Use user-provided config (Self-Hosting mode)
-                console.warn("WARNING: Canvas environment config is missing. Using user-provided Firebase configuration for self-hosting.");
+            } catch (e) {
+                // 2. Fallback if Canvas config exists but is invalid JSON
+                console.error("ERROR: Failed to parse __firebase_config JSON. Falling back to user-provided config.", e);
                 firebaseConfig = userProvidedConfig;
                 isSelfHosted = true;
             }
-        } catch (e) {
-            console.error("CRITICAL ERROR: Failed to determine Firebase configuration. Falling back to user-provided config.", e);
+        } else {
+            // 3. Fallback if Canvas config is completely missing (Self-Hosting mode)
+            console.warn("WARNING: Canvas environment config (__firebase_config) is missing. Using user-provided Firebase configuration for self-hosting.");
             firebaseConfig = userProvidedConfig;
             isSelfHosted = true;
+        }
+
+        // Final check to ensure the config object is valid before proceeding
+        if (!firebaseConfig || !firebaseConfig.apiKey) {
+             // This will be caught by the startApplication try/catch block
+             throw new Error("Firebase configuration object is invalid or does not contain an apiKey. Cannot initialize Firebase.");
         }
         
         // Hardcoded credentials for the design request (client-side login simulation)
@@ -125,13 +132,11 @@
 
         async function startApplication() {
             try {
-                if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey === "AIzaSyBp08uDYjTsjpZ1sP1xgNZ8dd_tVmytEcM") {
-                    // Display a warning if the user is self-hosting but hasn't updated the default provided key.
-                    if (isSelfHosted) {
-                        const errorDiv = document.getElementById('firebase-error');
-                        errorDiv.classList.remove('hidden');
-                        errorDiv.textContent = 'NOTICE: Using user-provided Firebase configuration. Ensure your Firebase project and security rules allow Anonymous or Custom Token sign-in.';
-                    }
+                // Display warning if the user is self-hosting but hasn't updated the default provided key.
+                if (isSelfHosted && firebaseConfig.apiKey === userProvidedConfig.apiKey) {
+                    const warningDiv = document.getElementById('firebase-warning');
+                    warningDiv.classList.remove('hidden');
+                    warningDiv.textContent = 'NOTICE: Using user-provided Firebase configuration. Ensure your Firebase project and security rules allow Anonymous or Custom Token sign-in.';
                 }
 
                 const app = initializeApp(firebaseConfig);
@@ -152,6 +157,7 @@
                     authReady = true;
                     document.getElementById('loading-indicator').classList.add('hidden');
                     document.getElementById('app-container').classList.remove('hidden');
+                    document.getElementById('firebase-warning').classList.add('hidden'); // Hide warning once auth is confirmed
 
                     if (user) {
                         userId = user.uid;
@@ -168,20 +174,20 @@
                         // Display error prominently
                         const errorDiv = document.getElementById('firebase-error');
                         errorDiv.classList.remove('hidden');
-                        errorDiv.textContent = 'ERROR: Failed to connect to database. Please check console for Firebase permissions/security rule issues.';
+                        errorDiv.textContent = 'ERROR: Failed to connect to database. Check console for Firebase permissions/security rule issues.';
                     }
                 });
 
             } catch (error) {
-                console.error("Error during App Initialization:", error);
-                document.getElementById('auth-status').textContent = `Initialization Error: ${error.message}`;
+                console.log("--- Firebase Initialization Error ---");
+                console.error(error);
                 
                 document.getElementById('loading-indicator').classList.add('hidden');
                 document.getElementById('app-container').classList.remove('hidden');
 
                 const errorDiv = document.getElementById('firebase-error');
                 errorDiv.classList.remove('hidden');
-                errorDiv.textContent = `CRITICAL ERROR: ${error.message}`;
+                errorDiv.textContent = `CRITICAL INITIALIZATION ERROR: ${error.message}. Please check the console for more details.`;
             }
         }
         
@@ -567,10 +573,16 @@
     <!-- Main Application Container -->
     <div id="app-container" class="hidden main-card">
         
-        <!-- Global Firebase Error/Warning Banner -->
-        <div id="firebase-error" class="hidden fixed top-0 left-0 right-0 p-3 bg-yellow-500 text-gray-800 text-sm text-center font-bold z-40 rounded-b-lg shadow-xl">
-            <!-- Error/Warning message injected here -->
+        <!-- Global Firebase Warning Banner (Only for self-hosting with default key) -->
+        <div id="firebase-warning" class="hidden fixed top-0 left-0 right-0 p-3 bg-yellow-500 text-gray-800 text-sm text-center font-bold z-40 rounded-b-lg shadow-xl">
+            <!-- Warning message injected here -->
         </div>
+
+        <!-- Global Firebase Error Banner (for critical failure) -->
+        <div id="firebase-error" class="hidden fixed top-0 left-0 right-0 p-3 bg-red-600 text-white text-sm text-center font-bold z-40 rounded-b-lg shadow-xl">
+            <!-- Error message injected here -->
+        </div>
+
 
         <!-- Delete Confirmation Modal (Replaces window.confirm) -->
         <div id="delete-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center transition-opacity duration-300">
