@@ -17,17 +17,17 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
-        // FIX: Using the explicit configuration provided by the user to ensure 'projectId' is present, 
-        // as the environment variable __firebase_config appears to be empty or misconfigured.
-        const firebaseConfig = {
-          apiKey: "AIzaSyBp08uDYjTsjpZ1sP1xgNZ8dd_tVmytEcM",
-          authDomain: "interviewss-e3ed9.firebaseapp.com",
-          projectId: "interviewss-e3ed9",
-          storageBucket: "interviewss-e3ed9.firebasestorage.app",
-          messagingSenderId: "374016275776",
-          appId: "1:374016275776:web:23636a52f3b46ba80576a5",
-          measurementId: "G-N2P4HXBF6E"
-        };
+        // FIX: Reverting to use the provided __firebase_config environment variable, 
+        // which is the official source of truth in the platform. The explicit hardcoding 
+        // was likely conflicting with the sandbox environment's setup and causing the Auth errors.
+        let firebaseConfig = null;
+        try {
+            firebaseConfig = JSON.parse(__firebase_config);
+        } catch (e) {
+            console.error("Critical: Failed to parse __firebase_config. Firestore operations will fail unless this is corrected.");
+            // Define a placeholder config to prevent crash in initializeApp
+            firebaseConfig = { projectId: 'missing-config-error' }; 
+        }
         
         // Hardcoded credentials for the design request (client-side login simulation)
         const MOCK_USERNAME = "staff";
@@ -90,7 +90,7 @@
                 auth = getAuth(app);
 
                 // Authenticate using the provided token or anonymously (NON-BLOCKING)
-                // We use .catch() to ensure errors don't crash initializeFirebase, 
+                // We use .catch() to ensure authentication errors don't crash initializeFirebase, 
                 // and rely on onAuthStateChanged to handle the final state.
                 if (initialAuthToken) {
                     signInWithCustomToken(auth, initialAuthToken)
